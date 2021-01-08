@@ -20,7 +20,8 @@ $ ./install
 ```
 If everything went well, the `install.sh` will take care of the virtual environment 
 set up and install all required packages and components automatically. The source code 
-scripts (`install.sh` and `clip.py`) will be moved to directory `source` and a executable 
+scripts (`install.sh` and `clip.py`) will be moved to directory `source` and three new 
+directories: venv, eclip and merge_peak will be created. Also, an executable 
 script `clip` will be created inside current directory. 
 
 ## Usage:
