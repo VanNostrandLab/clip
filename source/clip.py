@@ -68,6 +68,10 @@ cwltool {debug} \
     2>&1 \
     | tee {log_dir}/idr.${cluster_job_id}.${cluster_job_name}.log {stdout}
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "Merge Peak (IDR) complete."
+
+echo [$(date +"%m-%d-%Y %H:%M:%S")] "Cleaning up ..."
+rm -rf {tmpdir}
+echo [$(date +"%m-%d-%Y %H:%M:%S")] "All done."
 """
 
 DESCRIPTION = """A wrapper for using eCLIP to process CLIP data."""
