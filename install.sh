@@ -76,9 +76,9 @@ rm -rf "${clip}/makebigwigfiles"
 echo "    Successfully Installed makebigwigfiles."
 
 echo "Setting up virtual environment for merge peak (IDR) pipeline in ${merge_peak} ..."
-echo "    Installing Python (3.5.1) ...";
-conda create --prefix="${merge_peak_venv}" --yes --quiet python=3.5.1 >/dev/null 1>&2;
-echo "    Successful installed Python (3.5.1).";
+echo "    Installing Python (3.5) ...";
+conda create --prefix="${merge_peak_venv}" --yes --quiet python=3.5 > /dev/null;
+echo "    Successful installed Python (3.5).";
 
 #for package in cython numpy pandas scipy setuptools matplotlib
 for package in cython numpy=1.11 pandas=0.20 scipy=0.18 setuptools=27.2 matplotlib=2.0
@@ -89,7 +89,7 @@ done
 echo "    Installing IDR (2.0.2) ..."
 wget --quiet https://github.com/nboley/idr/archive/2.0.2.zip;
 unzip -qq 2.0.2.zip;
-"${merge_peak_venv}/bin/pip" install "${clip}/idr-2.0.2" --prefix="${merge_peak_venv}" --quiet >/dev/null;
+"${merge_peak_venv}/bin/pip" install "${clip}/idr-2.0.2" --prefix="${merge_peak_venv}" --quiet > /dev/null;
 rm -rf idr-2.0.2 2.0.2.zip
 echo "    Successfully Installed IDR (2.0.2)."
 echo "Successfully set up virtual environment and installed merge peak (IDR) pipeline to ${merge_peak} ..."
@@ -136,10 +136,10 @@ echo "    Successfully finalized installation."
 clip_py="${clip}/source/clip.py"
 bin_clip_py="${clip_venv}/bin/clip.py"
 sed "s|ECLIP_ENVIRONMENT|${clip_venv}/eclip_environment.sh|" "${clip_py}" > "${bin_clip_py}"
-sed "s|CLIP_ENVIRONMENT|${clip_venv}/clip_environment.sh|" "${clip_py}" > "${bin_clip_py}"
-sed "s|ECLIP|${eclip}|g" "${clip_py}" > "${bin_clip_py}"
-sed "s|MERGE_PEAK_ENVIRONMENT|${clip_venv}/merge_peak_environment.sh|" "${clip_py}" > "${bin_clip_py}"
-sed "s|MERGE_PEAK|${merge_peak}|" "${clip_py}" > "${bin_clip_py}"
+sed -i "s|CLIP_ENVIRONMENT|${clip_venv}/clip_environment.sh|" "${bin_clip_py}"
+sed -i "s|ECLIP|${eclip}|g" "${bin_clip_py}"
+sed -i "s|MERGE_PEAK_ENVIRONMENT|${clip_venv}/merge_peak_environment.sh|" "${bin_clip_py}"
+sed -i "s|MERGE_PEAK|${merge_peak}|" "${bin_clip_py}"
 
 echo "Successfully installed and set up environment for CLIP pipeline."
 echo "Run ${clip}/clip -h to see the usage."
