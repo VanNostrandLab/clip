@@ -47,24 +47,24 @@ source CLIP_ENVIRONMENT
 
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "eCLIP start."
 source ECLIP_ENVIRONMENT
-cwltool {debug} \
+cwltool {cache} \
     --no-container \
     --tmpdir-prefix={tmpdir}/ \
     --outdir={outdir} \
     ECLIP/cwl/{eclip_script} \
     {manifest} \
-    > {log_dir}/clip.${cluster_job_id}.${cluster_job_id}.log 2>&1
+    | tee {log_dir}/clip.${cluster_job_id}.${cluster_job_name}.log {stdout}
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "eCLIP complete."
 
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "Merge Peak (IDR) start."
 source MERGE_PEAK_ENVIRONMENT
-cwltool {debug} \
+cwltool {cache} \
     --no-container \
     --tmpdir-prefix={tmpdir}/ \
     --outdir={idr_outdir} \
     MERGE_PEAK/cwl/{idr_script} \
     {idr_config} \
-    > {log_dir}/idr.${cluster_job_id}.${cluster_job_id}.log 2>&1
+    | tee {log_dir}/idr.${cluster_job_id}.${cluster_job_name}.log {stdout}
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "Merge Peak (IDR) complete."
 """
 
@@ -228,7 +228,7 @@ def schedule(scheduler, manifest, outdir, tmpdir, script_dir, log_dir, idr_outdi
     data = {'cores': cores, 'runtime': runtime, 'memory': memory, 'jobname': jobname, 'manifest': manifest,
             'outdir': outdir, 'tmpdir': tmpdir, 'script_dir': script_dir, 'log_dir': log_dir, 'idr_outdir': idr_outdir,
             'eclip_script': eclip_script, 'idr_script': idr_script, 'idr_config': idr_config, 'debug': debug,
-            'cluster_job_name': cluster_job_name, 'cluster_job_id': cluster_job_id}
+            'cluster_job_name': cluster_job_name, 'cluster_job_id': cluster_job_id, 'stdout': stdout}
     if email:
         data['email'] = email
         text = [SBATCH, mail, CODE]
@@ -249,10 +249,10 @@ def schedule(scheduler, manifest, outdir, tmpdir, script_dir, log_dir, idr_outdi
 
 
 def clip(manifest, outdir, tmpdir, script_dir, log_dir, idr_outdir, eclip_script, idr_script, idr_config,
-         debug, cluster_job_name, cluster_job_id):
+         debug, cluster_job_name, cluster_job_id, stdout):
     data = {'manifest': manifest, 'outdir': outdir, 'tmpdir': tmpdir, 'script_dir': script_dir,
             'log_dir': log_dir, 'idr_outdir': idr_outdir, 'eclip_script': eclip_script, 'idr_script': idr_script,
-            'idr_config': idr_config, 'debug': debug,
+            'idr_config': idr_config, 'debug': debug, 'stdout': stdout,
             'cluster_job_name': cluster_job_name, 'cluster_job_id': cluster_job_id}
     text = ['#!/usr/bin/env bash', CODE]
     text = '\n'.join(text).format(**data)
@@ -293,7 +293,7 @@ def main():
     basedir = os.path.abspath(args.OUTDIR) if args.OUTDIR else os.path.dirname(manifest)
     basedir = _mkdir(os.path.dirname(basedir), os.path.basename(basedir))
     
-    dirs = ['temporary', 'results', 'logs', 'scripts']
+    dirs = ['tmp', 'results', 'logs', 'scripts']
     tmpdir, outdir, log_dir, script_dir = [_mkdir(basedir, d) for d in dirs]
     
     eclip_config = shutil.copy(manifest, os.path.join(script_dir, 'clip.yaml'))
@@ -301,6 +301,7 @@ def main():
     idr_outdir = _mkdir(basedir, 'idr')
     idr_script, idr_config = write_ird_manifest(data['species'], results, outdir, script_dir)
     debug = f'--debug --cachedir={_mkdir(basedir, "cache")}' if args.DEBUG else ''
+    stdout = '' if args.DEBUG else '> /dev/null'
     if args.SCHEDULER:
         names = {'PBS': '{PBS_JOBNAME}', 'SLURM': '{SLURM_JOB_NAME}', 'SBATCH': '{SLURM_JOB_NAME}'}
         cluster_job_name = names.get(args.SCHEDULER.upper(), '')
@@ -310,10 +311,10 @@ def main():
         cluster_job_id = ids.get(args.SCHEDULER.upper(), '')
         schedule(args.SCHEDULER, eclip_config, outdir, tmpdir, script_dir, log_dir, idr_outdir,
                  eclip_script, idr_script, idr_config, debug, args.CORES, args.MEMORY, args.TIME,
-                 args.JOBNAME, args.EMAIL, cluster_job_name, cluster_job_id)
+                 args.JOBNAME, args.EMAIL, cluster_job_name, cluster_job_id, stdout)
     else:
         clip(eclip_config, outdir, tmpdir, script_dir, log_dir, idr_outdir, eclip_script,
-             idr_script, idr_config, debug, 'LOCAL', 'USER')
+             idr_script, idr_config, debug, 'LOCAL', 'USER', stdout)
 
 
 if __name__ == '__main__':
