@@ -47,23 +47,25 @@ source CLIP_ENVIRONMENT
 
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "eCLIP start."
 source ECLIP_ENVIRONMENT
-cwltool {cache} \
+cwltool {debug} \
     --no-container \
     --tmpdir-prefix={tmpdir}/ \
     --outdir={outdir} \
     ECLIP/cwl/{eclip_script} \
     {manifest} \
+    2>&1 \
     | tee {log_dir}/clip.${cluster_job_id}.${cluster_job_name}.log {stdout}
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "eCLIP complete."
 
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "Merge Peak (IDR) start."
 source MERGE_PEAK_ENVIRONMENT
-cwltool {cache} \
+cwltool {debug} \
     --no-container \
     --tmpdir-prefix={tmpdir}/ \
     --outdir={idr_outdir} \
     MERGE_PEAK/cwl/{idr_script} \
     {idr_config} \
+    2>&1 \
     | tee {log_dir}/idr.${cluster_job_id}.${cluster_job_name}.log {stdout}
 echo [$(date +"%m-%d-%Y %H:%M:%S")] "Merge Peak (IDR) complete."
 """
