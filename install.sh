@@ -21,7 +21,7 @@ echo "Checking environment complete."
 
 clip="$( cd .; pwd -P )"
 eclip="${clip}/eclip"
-merge_peak="${clip}/merge_peak"
+merge_peak="${clip}/idr"
 clip_venv="${clip}/venv"
 merge_peak_venv="${merge_peak}/venv"
 
@@ -63,10 +63,6 @@ git clone --quiet https://github.com/VanNostrandLab/clipper.git "${clip}/clipper
 rm -rf "${clip}/clipper"
 echo "    Successfully Installed clipper."
 
-echo "    Installing eCLIP pipeline to ${eclip} ..."
-git clone --quiet https://github.com/VanNostrandLab/eclip.git "${eclip}"
-echo "    Successful installed eCLIP pipeline to ${eclip} ..."
-
 echo "    Installing eclipdemux ..."
 git clone --quiet https://github.com/VanNostrandLab/eclipdemux.git "${clip}/eclipdemux";
 "${clip_venv}/bin/pip" install "${clip}/eclipdemux" --prefix="${clip_venv}" --quiet;
@@ -79,11 +75,10 @@ git clone --quiet https://github.com/YeoLab/makebigwigfiles.git "${clip}/makebig
 rm -rf "${clip}/makebigwigfiles"
 echo "    Successfully Installed makebigwigfiles."
 
-echo "Installing merge peak (IDR) pipeline to ${merge_peak} ..."
-git clone --quiet https://github.com/VanNostrandLab/merge_peaks.git "${merge_peak}"
-echo "    Installing Python (3.5) ...";
-conda create --prefix="${merge_peak_venv}" --yes --quiet python=3.5 >/dev/null 1>&2;
-echo "    Successful installed Python (3.5).";
+echo "Setting up virtual environment for merge peak (IDR) pipeline in ${merge_peak} ..."
+echo "    Installing Python (3.5.1) ...";
+conda create --prefix="${merge_peak_venv}" --yes --quiet python=3.5.1 >/dev/null 1>&2;
+echo "    Successful installed Python (3.5.1).";
 
 #for package in cython numpy pandas scipy setuptools matplotlib
 for package in cython numpy=1.11 pandas=0.20 scipy=0.18 setuptools=27.2 matplotlib=2.0
@@ -97,16 +92,16 @@ unzip -qq 2.0.2.zip;
 "${merge_peak_venv}/bin/pip" install "${clip}/idr-2.0.2" --prefix="${merge_peak_venv}" --quiet >/dev/null;
 rm -rf idr-2.0.2 2.0.2.zip
 echo "    Successfully Installed IDR (2.0.2)."
-echo "Successfully installed merge peak (IDR) pipeline to ${merge_peak} ..."
+echo "Successfully set up virtual environment and installed merge peak (IDR) pipeline to ${merge_peak} ..."
 
 echo "    Finalizing installation ..."
-read -d '' clip_environment << EOF || true
+read -r -d '' clip_environment << EOF || true
 #!/usr/bin/env bash
 
 unset PYTHONPATH
 export PATH="${clip_venv}/bin:\$PATH"
 EOF
-echo "${clip_environment}" > "${clip_venv}/bin/clip_environment.sh"
+echo "${clip_environment}" > "${clip_venv}/clip_environment.sh"
 
 read -r -d '' eclip_environment << EOF || true
 #!/usr/bin/env bash
@@ -115,7 +110,7 @@ export PATH="${eclip}/bin:\$PATH"
 export PATH="${eclip}/cwl:\$PATH"
 export PATH="${eclip}/wf:\$PATH"
 EOF
-echo "${eclip_environment}" > "${clip_venv}/bin/eclip_environment.sh"
+echo "${eclip_environment}" > "${clip_venv}/eclip_environment.sh"
 
 read -r -d '' merge_peak_environment << EOF || true
 #!/usr/bin/env bash
@@ -126,27 +121,25 @@ export PATH="${merge_peak}/bin/perl:\$PATH"
 export PATH="${merge_peak}/cwl:\$PATH"
 export PATH="${merge_peak}/wf:\$PATH"
 EOF
-echo "${merge_peak_environment}" > "${clip_venv}/bin/merge_peak_environment.sh"
+echo "${merge_peak_environment}" > "${clip_venv}/merge_peak_environment.sh"
 
 read -r -d '' script << EOF || true
 #!/usr/bin/env bash
 
-source ${clip_venv}/bin/clip_environment.sh
+source ${clip_venv}/clip_environment.sh
 python ${clip_venv}/bin/clip.py \$@
 EOF
 echo "${script}" > "${clip}/clip"
 chmod +x "${clip}/clip"
 echo "    Successfully finalized installation."
 
-clip_py="${clip}/clip.py"
+clip_py="${clip}/source/clip.py"
 bin_clip_py="${clip_venv}/bin/clip.py"
-sed "s|ECLIP_ENVIRONMENT|${clip_venv}/bin/eclip_environment.sh|" "${clip_py}" > "${bin_clip_py}"
-sed -i "s|CLIP_ENVIRONMENT|${clip_venv}/bin/clip_environment.sh|" "${bin_clip_py}"
-sed -i "s|ECLIP|${eclip}|g" "${bin_clip_py}"
-sed -i "s|MERGE_PEAK_ENVIRONMENT|${clip_venv}/bin/merge_peak_environment.sh|" "${bin_clip_py}"
-sed -i "s|MERGE_PEAK|${merge_peak}|" "${bin_clip_py}"
-[ -d source ] || mkdir source
-cp "${clip_py}" source/
-cp install.sh source/
+sed "s|ECLIP_ENVIRONMENT|${clip_venv}/eclip_environment.sh|" "${clip_py}" > "${bin_clip_py}"
+sed "s|CLIP_ENVIRONMENT|${clip_venv}/clip_environment.sh|" "${clip_py}" > "${bin_clip_py}"
+sed "s|ECLIP|${eclip}|g" "${clip_py}" > "${bin_clip_py}"
+sed "s|MERGE_PEAK_ENVIRONMENT|${clip_venv}/merge_peak_environment.sh|" "${clip_py}" > "${bin_clip_py}"
+sed "s|MERGE_PEAK|${merge_peak}|" "${clip_py}" > "${bin_clip_py}"
+
 echo "Successfully installed and set up environment for CLIP pipeline."
 echo "Run ${clip}/clip -h to see the usage."
