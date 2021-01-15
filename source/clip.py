@@ -29,13 +29,14 @@ SBATCH_EMAIL = """
 PBS = """ #!/usr/bin/env bash
 
 #PBS -l nodes=1:ppn={cores}
-#PBS -l walltime={runtime}:00:00
-#PBS -l vmem={memory}GB
-#PBS -J {jobname}
+#PBS -l walltime={runtime}
+#PBS -l vmem={memory}gb
+#PBS -j oe
+#PBS -N {jobname}
 """
 PBS_EMAIL = """
 #PBS -M {email}
-#PBS -m n
+#PBS -m abe
 """
 
 CODE = r"""
@@ -220,14 +221,14 @@ def _mkdir(base, directory):
 
 
 def schedule(scheduler, manifest, outdir, tmpdir, script_dir, log_dir, idr_outdir, eclip_script, idr_script, idr_config,
-             debug, cores, memory, hours, jobname, email, cluster_job_name, cluster_job_id):
-    if scheduler.upper() == 'PBS':
+             debug, cores, memory, hours, jobname, email, cluster_job_name, cluster_job_id, stdout):
+    if scheduler.upper() in ('PBS', 'QSUB'):
         runtime = f'{hours}:00:00'
-        mail = PBS_EMAIL
+        directive, exe, mail = PBS, 'qsub', PBS_EMAIL
     elif scheduler.upper() in ('SLURM', 'SBATCH'):
         days, hours = divmod(hours, 24)
         runtime = f'{days}-{hours:02}:00'
-        mail = SBATCH_EMAIL
+        directive, exe, mail = SBATCH, 'sbatch', SBATCH_EMAIL
     else:
         raise ValueError(f'Unsupported scheduler: {scheduler}, see help for supported schedulers.')
     
@@ -237,16 +238,16 @@ def schedule(scheduler, manifest, outdir, tmpdir, script_dir, log_dir, idr_outdi
             'cluster_job_name': cluster_job_name, 'cluster_job_id': cluster_job_id, 'stdout': stdout}
     if email:
         data['email'] = email
-        text = [SBATCH, mail, CODE]
+        text = [directive, mail, CODE]
     else:
-        text = [SBATCH, CODE]
+        text = [directive, CODE]
     text = ''.join(text).format(**data)
     
     submitter = os.path.join(script_dir, 'submit.sh')
     with open(submitter, 'w') as o:
         o.write(text)
     print(f'Job submit script was saved to: {submitter}')
-    subprocess.run(['sbatch', submitter], cwd=log_dir)
+    subprocess.run([exe, submitter], cwd=log_dir)
     print(f'Job {jobname} was successfully submitted with the following settings:')
     data = {'Job name:': jobname, 'Manifest file:': manifest, 'Output directory:': outdir,
             'Number of cores:': cores, 'Job memory:': memory, 'Job runtime:': f'{runtime} (D-HH:MM)'}
