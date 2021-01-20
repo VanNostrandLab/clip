@@ -78,6 +78,64 @@ echo [$(date +"%m-%d-%Y %H:%M:%S")] "All done."
 DESCRIPTION = """A wrapper for using eCLIP to process CLIP data."""
 
 
+def parse_barcodes(barcodes):
+    if isinstance(barcodes, (tuple, list)):
+        barcode_ids = barcodes
+    elif isinstance(barcodes, str):
+        if os.path.isfile(barcodes):
+            barcode_file = barcodes
+        else:
+            raise ValueError(f'Invalid barcodes {barcodes}, it is not a file or does not exist.')
+    return barcodes
+
+
+class SingleEndRead(object):
+    def __init__(self, name, read_type, read1, adapters):
+        if not name:
+            self.name = name
+        else:
+            raise ValueError(f'No name or empty string was assigned to read name.')
+        if read_type.upper() in ('IP', 'INPUT'):
+            self.read_type = read_type.upper()
+        else:
+            raise ValueError(f'Invalid read_type {read_type}, only accepts IP or INPUT.')
+        if os.path.isfile(read1):
+            self.read1 = read1
+        else:
+            raise ValueError(f'Invalid read {read1}, may not be a file or does not exist.')
+        if os.path.isfile(adapters):
+            self.adapters = adapters
+        else:
+            raise ValueError(f'Invalid adapters {adapters}, may not be a file or does not exist.')
+        
+    def umi_extract(self):
+        pass
+    
+    def cut_adapt(self):
+        pass
+
+
+class PairedEndRead(object):
+    def __init__(self, name, read_type, read1, read2, barcodes):
+        if not name:
+            self.name = name
+        else:
+            raise ValueError(f'No name or empty string was assigned to read name.')
+        if read_type.upper() in ('IP', 'INPUT'):
+            self.read_type = read_type.upper()
+        else:
+            raise ValueError(f'Invalid read_type {read_type}, only accepts IP or INPUT.')
+        if os.path.isfile(read1):
+            self.read1 = read1
+        else:
+            raise ValueError(f'Invalid read1 {read1}, may not be a file or does not exist.')
+        if os.path.isfile(read2):
+            self.read1 = read2
+        else:
+            raise ValueError(f'Invalid read2 {read2}, may not be a file or does not exist.')
+        self.barcodes = parse_barcodes(barcodes)
+
+
 def parse_manifest(manifest):
     if os.path.isfile(manifest):
         yaml = YAML(typ='safe')
