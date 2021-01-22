@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-A shortcut for using eCLIP pipeline to process RNA-Seq data on SLURM (SBATCH) Cluster.
+A shortcut for using eCLIP pipeline to process CLIP data on HPC Cluster.
 """
 
 import os

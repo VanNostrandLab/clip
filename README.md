@@ -1,6 +1,6 @@
 # clip
 
-A wrapper for running eCLIP and merge_peak (IDR) pipelines from command line. 
+A shortcut for using eCLIP pipeline to process CLIP data on HPC Cluster.
 
 ## Installation
 Clone this repository, cd into clip directory and then run `./install.sh`:
@@ -16,13 +16,13 @@ then try it again:
 
 ```shell script
 $ chmod +x install.sh
-$ ./install
+$ ./install.sh
 ```
 If everything went well, the `install.sh` will take care of the virtual environment 
-set up and install all required packages and components automatically. The source code 
-scripts (`install.sh` and `clip.py`) will be moved to directory `source` and three new 
-directories: venv, eclip and merge_peak will be created. Also, an executable 
-script `clip` will be created inside current directory. 
+set up and install all required packages and components automatically. The script 
+`install.sh` will be moved to directory `source` and three new directories: venv, eclip and 
+merge_peak will be created. Also, an executable script `clip` will be created inside 
+current directory. 
 
 ## Usage:
 Once `clip` was successfully installed, it will tell you how to display its 
@@ -34,7 +34,7 @@ $ ./clip -h
 usage: clip [-h] [-o OUTDIR] [-j JOBNAME] [-e EMAIL] [-s SCHEDULER] [-t TIME] [-m MEMORY] 
             [-n CORES] [--debug] MANIFEST
 
-A shortcut for using eCLIP pipeline to process RNA-Seq data on SLURM (SBATCH) Cluster.
+A shortcut for using eCLIP pipeline to process CLIP data on HPC Cluster.
 
 positional arguments:
   MANIFEST      Manifest YAML or JSON file describing paths of your dataset.
@@ -43,7 +43,7 @@ optional arguments:
   -h, --help    show this help message and exit
   -o OUTDIR     Path of the base output directory, default: the manifest file's parent directory.
   -j JOBNAME    Name of your job, default: eCLIP
-  -e EMAIL      Email address for notify you the start and end of you job.
+  -e EMAIL      Email address for notify you the status (start, end, and abort) of you job.
   -s SCHEDULER  Name of the scheduler on your cluster, e.g., PBS (or qsub) or SBATCH (or slurm).
   -t TIME       Time (in integer hours) needed for your job, default: 32.
   -m MEMORY     Amount of memory (in GB) for all cores needed for your job, default: 32.
