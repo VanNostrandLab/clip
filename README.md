@@ -31,7 +31,8 @@ its usage by yourself.
 
 ```shell script
 $ ./clip -h
-usage: clip [-h] [-o OUTDIR] [-j JOBNAME] [-e EMAIL] [-s SCHEDULER] [-t TIME] [-m MEMORY] [-n CORES] [--debug] MANIFEST
+usage: clip [-h] [-o OUTDIR] [-j JOBNAME] [-e EMAIL] [-s SCHEDULER] [-t TIME] [-m MEMORY] 
+            [-n CORES] [--debug] MANIFEST
 
 A shortcut for using eCLIP pipeline to process RNA-Seq data on SLURM (SBATCH) Cluster.
 
