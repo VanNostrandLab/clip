@@ -31,6 +31,23 @@ its usage by yourself.
 
 ```shell script
 $ ./clip -h
+usage: clip [-h] [-o OUTDIR] [-j JOBNAME] [-e EMAIL] [-s SCHEDULER] [-t TIME] [-m MEMORY] [-n CORES] [--debug] MANIFEST
+
+A shortcut for using eCLIP pipeline to process RNA-Seq data on SLURM (SBATCH) Cluster.
+
+positional arguments:
+  MANIFEST      Manifest YAML or JSON file describing paths of your dataset.
+
+optional arguments:
+  -h, --help    show this help message and exit
+  -o OUTDIR     Path of the base output directory, default: the manifest file's parent directory.
+  -j JOBNAME    Name of your job, default: eCLIP
+  -e EMAIL      Email address for notify you the start and end of you job.
+  -s SCHEDULER  Name of the scheduler on your cluster, e.g., PBS (or qsub) or SBATCH (or slurm).
+  -t TIME       Time (in integer hours) needed for your job, default: 32.
+  -m MEMORY     Amount of memory (in GB) for all cores needed for your job, default: 32.
+  -n CORES      Number of cores needed for your job, default: 8.
+  --debug       Run the analysis in debug mode and keep cache files.
 ```
 
 Note: in case you are no logger in the installation directory, you need to call `clip` using 
