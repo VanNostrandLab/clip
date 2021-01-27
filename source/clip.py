@@ -2,327 +2,330 @@
 # -*- coding: utf-8 -*-
 
 """
-A shortcut for using eCLIP pipeline to process CLIP data on HPC Cluster.
+A pipeline designed to identify genomic locations of RNA-bound proteins.
+
 """
 
 import os
 import sys
-import shutil
+import logging
 import subprocess
-import argparse
+import glob
 
-from ruamel.yaml import YAML
+import ruffus
 
-SBATCH = """#!/usr/bin/env bash
+CORES = 4
+GENOME_INDEX = '/storage/vannostrand/reference_data/hg19/genome_star_index'
+REPEAT_INDEX = '/storage/vannostrand/reference_data/hg19/repbase_v2_star_index'
+SPECIES = 'hg19'
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-#SBATCH -n {cores}                  # Number of cores (-n)
-#SBATCH -N 1                        # Ensure that all cores are on one Node (-N)
-#SBATCH -t {runtime}                # Runtime in D-HH:MM, minimum of 10 minutes
-#SBATCH --mem={memory}G             # Memory pool for all cores (see also --mem-per-cpu)
-#SBATCH --job-name={jobname}        # Short name for the job
-"""
-SBATCH_EMAIL = """
-#SBATCH --mail-user={email}
-#SBATCH --mail-type=ALL
-"""
+logger = logging.getLogger("CLIP")
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler(sys.stderr)
+handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+handler.setLevel(logging.DEBUG)
+logger.addHandler(handler)
+note = logging.FileHandler(filename='chimeras.log', mode='w')
+note.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+note.setLevel(logging.DEBUG)
+logger.addHandler(note)
 
-PBS = """ #!/usr/bin/env bash
-
-#PBS -l nodes=1:ppn={cores}
-#PBS -l walltime={runtime}
-#PBS -l vmem={memory}gb
-#PBS -j oe
-#PBS -N {jobname}
-"""
-PBS_EMAIL = """
-#PBS -M {email}
-#PBS -m abe
-"""
-
-CODE = r"""
-LOCAL=local
-export TMPDIR={tmpdir}
-export TEMP={tmpdir}
-export TMP={tmpdir}
-source CLIP_ENVIRONMENT
-
-echo [$(date +"%m-%d-%Y %H:%M:%S")] "eCLIP start."
-source ECLIP_ENVIRONMENT
-cwltool {debug} \
-    --no-container \
-    --tmpdir-prefix={tmpdir}/ \
-    --outdir={outdir} \
-    ECLIP/cwl/{eclip_script} \
-    {manifest} \
-    2>&1 \
-    | tee {log_dir}/clip.${cluster_job_id}.${cluster_job_name}.log {stdout}
-echo [$(date +"%m-%d-%Y %H:%M:%S")] "eCLIP complete."
-
-echo [$(date +"%m-%d-%Y %H:%M:%S")] "Merge Peak (IDR) start."
-source MERGE_PEAK_ENVIRONMENT
-cwltool {debug} \
-    --no-container \
-    --tmpdir-prefix={tmpdir}/ \
-    --outdir={idr_outdir} \
-    MERGE_PEAK/cwl/{idr_script} \
-    {idr_config} \
-    2>&1 \
-    | tee {log_dir}/idr.${cluster_job_id}.${cluster_job_name}.log {stdout}
-echo [$(date +"%m-%d-%Y %H:%M:%S")] "Merge Peak (IDR) complete."
-
-echo [$(date +"%m-%d-%Y %H:%M:%S")] "Cleaning up ..."
-rm -rf {tmpdir}
-echo [$(date +"%m-%d-%Y %H:%M:%S")] "All done."
-"""
-
-DESCRIPTION = """A wrapper for using eCLIP to process CLIP data."""
+fastqs = ['/storage/vannostrand/benchmark_data/chimeCLIP_yeolabpipeline_2/Au4_S4_L001_R1_001.fastq.gz']
+MATURE_FASTA = '/storage/vannostrand/benchmark_data/chimeCLIP_yeolabpipeline_2/mature.hsa.T.fa'
 
 
-def parse_manifest(manifest):
-    if os.path.isfile(manifest):
-        yaml = YAML(typ='safe')
-        with open(manifest) as f:
-            shebang = f.readline()
-            data = yaml.load(f)
-        return shebang, data
-    else:
-        raise ValueError(f'Manifest {manifest} may not be a file or does not exist.')
-
-
-def _validate_entry(data, key):
-    try:
-        value = data[key]
-        if isinstance(value, dict):
-            _class = value.get('class', '')
-            _path = value.get('path', '')
-            if _class == 'Directory':
-                if not os.path.isdir(_path):
-                    raise ValueError(f'Path {_path} for {key} may not be a {_class.lower()} or does not exist.')
-            elif _class == 'File':
-                if not os.path.isfile(_path):
-                    raise ValueError(f'Path {_path} for {key} may not be a {_class.lower()} or does not exist.')
+def run_cmd(cmd, output_mode='wt', **kwargs):
+    """
+    Run cmd or throw exception if run fails.
+    """
+    
+    def cmding(cmd):
+        cmd = [str(c) for c in cmd]
+        if '<' in cmd:
+            raise ValueError('Invalid cmd, standard input via "<" not supported yet.')
+        message = ' '.join(cmd).replace(' -', ' \\\n  -').replace(' >', ' \\\n  >')
+        if '>' in cmd:
+            output = cmd[cmd.index('>') + 1]
+            cmd = cmd[:cmd.index('>')]
         else:
-            if not value:
-                raise ValueError(f'No valid value was found for {key}')
-    except ValueError:
-        raise ValueError(f'Manifest missing keyword {key}.')
-
-
-def _validate_read(read, path):
-    if path:
-        if not os.path.isfile(path):
-            raise ValueError(f'Path {path} for {read} may not be a file or does not exist.')
-    else:
-        if read == 'read1':
-            raise ValueError(f'Missing keyword path for {read}.')
-    return path
-
-
-def _validate_se_sample(sample, dataset):
-    ip, inp = [s for s in sample if 'ip_read' in s][0], [s for s in sample if 'input_read' in s][0]
-    ip_name, inp_name = ip.get('name', ''), inp.get('name', '')
-    if not ip_name:
-        raise ValueError(f'The ip_read {ip} does not have a name.')
-    if not inp_name:
-        raise ValueError(f'The input_read {inp} does not have a name.')
-    _validate_read('read1', ip.get('read1', {}).get('path', ''))
-    _validate_read('adapters', ip.get('adapters', {}).get('path', ''))
-    input_read = _validate_read('read1', inp.get('read1', {}).get('path', ''))
-    _validate_read('adapters', inp.get('adapters', {}).get('path', ''))
-    ip_bam = f'{dataset}.{ip_name}.umi.r1.fq.genome-mappedSoSo.rmDupSo.bam'
-    inp_bam = f'{dataset}.{inp_name}.umi.r1.fq.genome-mappedSoSo.rmDupSo.bam'
-    bed = f'{dataset}.{ip_name}.umi.r1.fq.genome-mappedSoSo.rmDupSo.peakClusters.bed'
-    return ip_name, ip_bam, inp_bam, bed, input_read, ''
-
-
-def _validate_pe_sample(sample, dataset):
-    ip, inp = [s for s in sample if 'ip_read' in s][0], [s for s in sample if 'input_read' in s][0]
-    ip_name, inp_name = ip.get('name', ''), inp.get('name', '')
-    if not ip_name:
-        raise ValueError(f'The ip_read {ip} does not have a name.')
-    if not inp_name:
-        raise ValueError(f'The input_read {inp} does not have a name.')
-    _validate_read('read1', ip.get('read1', {}).get('path', ''))
-    _validate_read('read2', ip.get('read2', {}).get('path', ''))
-    input_read1 = _validate_read('read1', inp.get('read1', {}).get('path', ''))
-    input_read2 = _validate_read('read2', inp.get('read2', {}).get('path', ''))
-    ip_barcodes, inp_barcodes = ip.get('barcodeids', []), inp.get('barcodeids', [])
-    if not ip_barcodes:
-        raise ValueError(f'The ip_read {ip} does not have barcodes.')
-    if not inp_barcodes:
-        raise ValueError(f'The input_read {inp} does not have barcodes.')
-    ip_bam = f'{dataset}.{ip_name}.{ip_barcodes[0]}.r1.fq.genome-mappedSo.rmDupSo.bam'
-    inp_bam = f'{dataset}.{inp_name}.{inp_barcodes[0]}.r1.fq.genome-mappedSo.rmDupSo.bam'
-    bed = f'{dataset}.{ip_name}.{ip_barcodes[0]}.r1.fq.genome-mappedSo.rmDupSo.peakClusters.bed'
-    return ip_name, ip_bam, inp_bam, bed, input_read1, input_read2
-
-
-def validate_se_manifest(data):
-    for key in ('dataset', 'species', 'speciesGenomeDir', 'repeatElementGenomeDir', 'chrom_sizes',
-                'samples', 'blacklist_file'):
-        _validate_entry(data, key)
-    results = [_validate_se_sample(sample, data['dataset']) for sample in data['samples']]
-    return results
-
-
-def validate_pe_manifest(data):
-    for key in ('dataset', 'species', 'speciesGenomeDir', 'repeatElementGenomeDir', 'chrom_sizes',
-                'samples', 'randomer_length', 'barcodesfasta'):
-        _validate_entry(data, key)
-    results = [_validate_pe_sample(sample, data['dataset']) for sample in data['samples']]
-    return results
-
-
-def validate_clip_manifest(manifest):
-    shebang, data = parse_manifest(manifest)
-    if 'singleend' in shebang:
-        return validate_se_manifest(data)
-    elif 'pairedend' in shebang:
-        return validate_pe_manifest(data)
-    else:
-        raise ValueError('Manifest file does not have a valid shebang line.')
-
-
-def write_ird_manifest(species, results, eclip_outdir, script_outdir):
-    input_reads = []
-    lines = ['', '', f'species: {species}', 'samples:', '  -']
-    for result in results:
-        lines.append(f'    - name: {result[0]}')
-        lines.append(f'      ip_bam:')
-        lines.append(f'        class: File')
-        lines.append(f'        path: {os.path.join(eclip_outdir, result[1])}')
-        lines.append(f'      input_bam:')
-        lines.append(f'        class: File')
-        lines.append(f'        path: {os.path.join(eclip_outdir, result[2])}')
-        lines.append(f'      peak_clusters:')
-        lines.append(f'        class: File')
-        lines.append(f'        path: {os.path.join(eclip_outdir, result[3])}')
-        input_reads.append(result[4:])
-    input_reads = [''.join(read) for read in input_reads]
-    mode = '2inputs' if len(input_reads) == len(set(input_reads)) > 1 else '1input'
-    script = f'wf_full_IDR_pipeline_{mode}_scatter.cwl'
-    shebang = f'#!/usr/bin/env eCLIP_full_IDR_pipeline_{mode}_scatter_singleNode'
-    lines[0] = shebang
-    idr_config = os.path.join(script_outdir, 'idr.yaml')
-    with open(idr_config, 'w') as o:
-        o.writelines(f'{line}\n' for line in lines)
-    return script, idr_config
-
-
-def _mkdir(base, directory):
-    folder = os.path.join(base, directory)
-    if not os.path.isdir(folder):
-        try:
-            os.mkdir(folder)
-        except OSError as e:
-            print(e)
-            sys.exit(1)
-    return folder
-
-
-def schedule(scheduler, manifest, outdir, tmpdir, script_dir, log_dir, idr_outdir, eclip_script, idr_script, idr_config,
-             debug, cores, memory, hours, jobname, email, cluster_job_name, cluster_job_id, stdout):
-    if scheduler.upper() in ('PBS', 'QSUB'):
-        runtime = f'{hours}:00:00'
-        directive, exe, mail = PBS, 'qsub', PBS_EMAIL
-    elif scheduler.upper() in ('SLURM', 'SBATCH'):
-        days, hours = divmod(hours, 24)
-        runtime = f'{days}-{hours:02}:00'
-        directive, exe, mail = SBATCH, 'sbatch', SBATCH_EMAIL
-    else:
-        raise ValueError(f'Unsupported scheduler: {scheduler}, see help for supported schedulers.')
+            output = ''
+        logger.debug(f'\n{message}')
+        return cmd, output
     
-    data = {'cores': cores, 'runtime': runtime, 'memory': memory, 'jobname': jobname, 'manifest': manifest,
-            'outdir': outdir, 'tmpdir': tmpdir, 'script_dir': script_dir, 'log_dir': log_dir, 'idr_outdir': idr_outdir,
-            'eclip_script': eclip_script, 'idr_script': idr_script, 'idr_config': idr_config, 'debug': debug,
-            'cluster_job_name': cluster_job_name, 'cluster_job_id': cluster_job_id, 'stdout': stdout}
-    if email:
-        data['email'] = email
-        text = [directive, mail, CODE]
+    cmd, output = cmding(cmd)
+    if output:
+        text_mode = True if 't' in output_mode else None
+        with open(output, output_mode) as out:
+            process = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, text=text_mode, **kwargs)
+        if process.returncode:
+            message = process.stderr or open(output).read()
+            raise Exception(f'Failed to run {cmd[0]} (exit code {process.returncode}):\n{message}')
     else:
-        text = [directive, CODE]
-    text = ''.join(text).format(**data)
-    
-    submitter = os.path.join(script_dir, 'submit.sh')
-    with open(submitter, 'w') as o:
-        o.write(text)
-    print(f'Job submit script was saved to: {submitter}')
-    subprocess.run([exe, submitter], cwd=log_dir)
-    print(f'Job {jobname} was successfully submitted with the following settings:')
-    data = {'Job name:': jobname, 'Manifest file:': manifest, 'Output directory:': outdir,
-            'Number of cores:': cores, 'Job memory:': memory, 'Job runtime:': f'{runtime} (D-HH:MM)'}
-    for k, v in data.items():
-        print(f'{k:>20} {v}')
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
+        stdout, stderr = process.communicate()
+        if process.returncode:
+            raise Exception(f'Failed to run {cmd[0]} (exit code {process.returncode}):{stderr or stdout}')
 
 
-def clip(manifest, outdir, tmpdir, script_dir, log_dir, idr_outdir, eclip_script, idr_script, idr_config,
-         debug, cluster_job_name, cluster_job_id, stdout):
-    data = {'manifest': manifest, 'outdir': outdir, 'tmpdir': tmpdir, 'script_dir': script_dir,
-            'log_dir': log_dir, 'idr_outdir': idr_outdir, 'eclip_script': eclip_script, 'idr_script': idr_script,
-            'idr_config': idr_config, 'debug': debug, 'stdout': stdout,
-            'cluster_job_name': cluster_job_name, 'cluster_job_id': cluster_job_id}
-    text = ['#!/usr/bin/env bash', CODE]
-    text = '\n'.join(text).format(**data)
-    script = os.path.join(script_dir, 'script.sh')
-    with open(script, 'w') as o:
-        o.write(text)
-    subprocess.run(['bash', script], cwd=log_dir)
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, prog='clip')
-    parser.add_argument('MANIFEST', type=str, help='Manifest YAML or JSON file describing paths of your dataset.')
-    parser.add_argument('-o', type=str, dest='OUTDIR',
-                        help="Path of the base output directory, default: the manifest file's parent directory.")
-    parser.add_argument('-j', type=str, dest='JOBNAME',
-                        help="Name of your job, default: eCLIP", default='eCLIP')
-    parser.add_argument('-e', type=str, dest='EMAIL',
-                        help='Email address for notify you the start and end of you job.')
-    parser.add_argument('-s', type=str, dest='SCHEDULER',
-                        help='Name of the scheduler on your cluster, e.g., PBS (or qsub) or SBATCH (or slurm).')
-    parser.add_argument('-t', type=int, dest='TIME',
-                        help='Time (in integer hours) needed for your job, default: 32.', default=32)
-    parser.add_argument('-m', type=int, dest='MEMORY',
-                        help='Amount of memory (in GB) for all cores needed for your job, default: 32.', default=32)
-    parser.add_argument('-n', type=int, dest='CORES',
-                        help='Number of cores needed for your job, default: 8.', default=8)
-    parser.add_argument('--debug', action='store_true', dest='DEBUG',
-                        help='Run the analysis in debug mode and keep cache files.')
-    
-    args = parser.parse_args()
-    manifest = os.path.abspath(args.MANIFEST)
-    if os.path.isfile(manifest):
-        results = validate_clip_manifest(manifest)
+@ruffus.jobs_limit(1)
+# @ruffus.follows(ruffus.mkdir('logs', 'data', 'results', 'scripts'))
+@ruffus.transform(fastqs, ruffus.formatter(r'.+/(?P<BASENAME>.*).f[ast]*q.gz$'),
+                  os.path.join(os.getcwd(), '{BASENAME[0]}.fastq.gz'))
+def soft_link_rawdata_to_data_directory(fastq, link):
+    if fastq == link:
+        logger.warning("No symbolic link made. You are directly working on the original data files.")
     else:
-        raise ValueError('The manifest "{}" may not be a file or does not exist.'.format(manifest))
+        logger.debug(f'Soft link {os.path.basename(fastq)}:\n  ln -s {fastq} {link}')
+        os.symlink(fastq, link)
+
+
+@ruffus.transform(soft_link_rawdata_to_data_directory,
+                  ruffus.formatter(r'.+/(?P<BASENAME>.*).fastq.gz$'),
+                  os.path.join(os.getcwd(), '{BASENAME[0]}.umi.fastq.gz'))
+def extract_umi(fastq, umi_extracted_fastq):
+    cmd = ['umi_tools',
+           'extract',
+           '--random-seed', 1,
+           '--stdin', fastq,
+           '--bc-pattern', 'NNNNNNNNNN',
+           '--log', umi_extracted_fastq.replace('.fastq.gz', '.extract.metrics'),
+           '--stdout', umi_extracted_fastq]
+    logger.debug(f'Extracting UMIs for {os.path.basename(fastq)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Extracting UMIs for {os.path.basename(fastq)} completed.')
+
+
+@ruffus.jobs_limit(1)
+@ruffus.transform(extract_umi, ruffus.suffix('.fastq.gz'), '.trimmed.fastq.gz')
+def cut_adapter(fastq, adapter_trimmed_fastq):
+    cmd = ['cutadapt',
+           '-j', CORES,
+           '-O', 1,
+           '--match-read-wildcards',
+           '--times', 1,
+           '-e', 0.1,
+           '--quality-cutoff', 6,
+           '-m', 18,
+           '-o', adapter_trimmed_fastq,
+           '-a', 'NNAGATCGGAAGAGC',
+           '-a', 'NAGATCGGAAGAGCA',
+           '-a', 'AGATCGGAAGAGCAC',
+           '-a', 'GATCGGAAGAGCACA',
+           '-a', 'ATCGGAAGAGCACAC',
+           '-a', 'TCGGAAGAGCACACG',
+           '-a', 'CGGAAGAGCACACGT',
+           '-a', 'GGAAGAGCACACGTC',
+           '-a', 'GAAGAGCACACGTCT',
+           '-a', 'AAGAGCACACGTCTG',
+           '-a', 'AGAGCACACGTCTGA',
+           '-a', 'GAGCACACGTCTGAA',
+           '-a', 'AGCACACGTCTGAAC',
+           '-a', 'GCACACGTCTGAACT',
+           '-a', 'CACACGTCTGAACTC',
+           '-a', 'ACACGTCTGAACTCC',
+           '-a', 'CACGTCTGAACTCCA',
+           '-a', 'ACGTCTGAACTCCAG',
+           '-a', 'CGTCTGAACTCCAGT',
+           '-a', 'GTCTGAACTCCAGTC',
+           '-a', 'TCTGAACTCCAGTCA',
+           '-a', 'CTGAACTCCAGTCAC',
+           fastq, '>', adapter_trimmed_fastq.replace('.trimmed.fastq.gz', '.cutadapt.metrics')]
+    logger.debug(f'Trimming adapters for {os.path.basename(fastq)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Trimming adapters {os.path.basename(fastq)} completed.')
+
+
+@ruffus.jobs_limit(1)
+@ruffus.transform(cut_adapter, ruffus.suffix('.trimmed.fastq.gz'), '.trimmed.trimmed.fastq')
+def cut_adapter_again(fastq, adapter_trimmed_fastq):
+    cmd = ['cutadapt',
+           '-j', CORES,
+           '-O', 1,
+           '--match-read-wildcards',
+           '--times', 1,
+           '-e', 0.1,
+           '--quality-cutoff', 6,
+           '-m', 18,
+           '-o', adapter_trimmed_fastq,
+           '-a', 'NNAGATCGGAAGAGC',
+           '-a', 'NAGATCGGAAGAGCA',
+           '-a', 'AGATCGGAAGAGCAC',
+           '-a', 'GATCGGAAGAGCACA',
+           '-a', 'ATCGGAAGAGCACAC',
+           '-a', 'TCGGAAGAGCACACG',
+           '-a', 'CGGAAGAGCACACGT',
+           '-a', 'GGAAGAGCACACGTC',
+           '-a', 'GAAGAGCACACGTCT',
+           '-a', 'AAGAGCACACGTCTG',
+           '-a', 'AGAGCACACGTCTGA',
+           '-a', 'GAGCACACGTCTGAA',
+           '-a', 'AGCACACGTCTGAAC',
+           '-a', 'GCACACGTCTGAACT',
+           '-a', 'CACACGTCTGAACTC',
+           '-a', 'ACACGTCTGAACTCC',
+           '-a', 'CACGTCTGAACTCCA',
+           '-a', 'ACGTCTGAACTCCAG',
+           '-a', 'CGTCTGAACTCCAGT',
+           '-a', 'GTCTGAACTCCAGTC',
+           '-a', 'TCTGAACTCCAGTCA',
+           '-a', 'CTGAACTCCAGTCAC',
+           fastq, '>', adapter_trimmed_fastq.replace('.trimmed.fastq', '.cutadapt.metrics')]
+    logger.debug(f'Trimming adapters for {os.path.basename(fastq)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Trimming adapters {os.path.basename(fastq)} completed.')
+
+
+@ruffus.transform(cut_adapter_again, ruffus.suffix('.trimmed.fastq'), '.trimmed.sorted.fastq')
+def sort_fastq(fastq, sorted_fastq):
+    cmd = ['fastq-sort', '--id', fastq, '>', sorted_fastq]
+    logger.debug(f'Sorting adapters trimmed fastq for {os.path.basename(fastq)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Sorting adapters trimmed fastq for {os.path.basename(fastq)} completed.')
+
+
+@ruffus.jobs_limit(1)
+@ruffus.transform(sort_fastq, ruffus.suffix('.trimmed.trimmed.sorted.fastq'), '.repeat.elements.Unmapped.out.mate1')
+def repeat_map(sorted_fastq, mate):
+    cmd = ['STAR',
+           '--runMode', 'alignReads',
+           '--runThreadN', CORES,
+           '--alignEndsType', 'EndToEnd',
+           '--genomeDir', REPEAT_INDEX,
+           '--genomeLoad', 'NoSharedMemory',
+           '--outBAMcompression', 10,
+           '--outFileNamePrefix', mate.replace('repeat.elements.Unmapped.out.mate1', ''),
+           '--outFilterMultimapNmax', 30,
+           '--outFilterMultimapScoreRange', 1,
+           '--outFilterScoreMin', 10,
+           '--outFilterType', 'BySJout',
+           '--outReadsUnmapped', 'Fastx',
+           '--outSAMattrRGline', 'ID:foo',
+           '--outSAMattributes', 'All',
+           '--outSAMmode', 'Full',
+           '--outSAMtype', 'BAM', 'Unsorted',
+           '--outSAMunmapped', 'Within',
+           '--outStd', 'Log',
+           '--readFilesIn', sorted_fastq]
+    logger.debug(f'Mapping reads to repeat elements for {os.path.basename(sorted_fastq)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Mapping reads to repeat elements for {os.path.basename(sorted_fastq)} completed.')
+
+
+@ruffus.jobs_limit(1)
+@ruffus.transform(repeat_map, ruffus.suffix('.repeat.elements.Unmapped.out.mate1'), '.genome.map.Aligned.out.bam')
+def genomic_map(mate, bam):
+    cmd = ['STAR',
+           '--runMode', 'alignReads',
+           '--runThreadN', CORES,
+           '--alignEndsType', 'EndToEnd',
+           '--genomeDir', GENOME_INDEX,
+           '--genomeLoad', 'NoSharedMemory',
+           '--outBAMcompression', 10,
+           '--outFileNamePrefix', bam.replace('genome.map.Aligned.out.bam', ''),
+           '--outFilterMultimapNmax', 1,
+           '--outFilterMultimapScoreRange', 1,
+           '--outFilterScoreMin', 10,
+           '--outFilterType', 'BySJout',
+           '--outReadsUnmapped', 'Fastx',
+           '--outSAMattrRGline', 'ID:foo',
+           '--outSAMattributes', 'All',
+           '--outSAMmode', 'Full',
+           '--outSAMtype', 'BAM', 'Unsorted',
+           '--outSAMunmapped', 'Within',
+           '--outStd', 'Log',
+           '--readFilesIn', mate]
+    logger.debug(f'Mapping reads to reference genome for {os.path.basename(mate)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Mapping reads to reference genome for {os.path.basename(mate)} completed.')
+
+
+@ruffus.transform(genomic_map, ruffus.suffix('.Aligned.out.bam'), '.name.sorted.bam')
+def name_sort_bam(bam, sorted_bam):
+    cmd = ['samtools', 'sort', '-n', '-o', sorted_bam, bam]
+    logger.debug(f'Name sorting BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Name sorting BAM {os.path.basename(bam)} completed.')
+
+
+@ruffus.transform(name_sort_bam, ruffus.suffix('.name.sorted.bam'), '.name.sorted.pos.sorted.bam')
+def pos_sort_bam(bam, sorted_bam):
+    cmd = ['samtools', 'sort', '-o', sorted_bam, bam]
+    logger.debug(f'Position sorting BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Position sorting BAM {os.path.basename(bam)} completed.')
     
-    shebang, data = parse_manifest(manifest)
-    basedir = os.path.abspath(args.OUTDIR) if args.OUTDIR else os.path.dirname(manifest)
-    basedir = _mkdir(os.path.dirname(basedir), os.path.basename(basedir))
-    
-    dirs = ['tmp', 'results', 'logs', 'scripts']
-    tmpdir, outdir, log_dir, script_dir = [_mkdir(basedir, d) for d in dirs]
-    
-    eclip_config = shutil.copy(manifest, os.path.join(script_dir, 'clip.yaml'))
-    eclip_script = 'wf_get_peaks_scatter_pe.cwl' if 'paired' in shebang else 'wf_get_peaks_scatter_se.cwl'
-    idr_outdir = _mkdir(basedir, 'idr')
-    idr_script, idr_config = write_ird_manifest(data['species'], results, outdir, script_dir)
-    debug = f'--debug --cachedir={_mkdir(basedir, "cache")}' if args.DEBUG else ''
-    stdout = '' if args.DEBUG else '> /dev/null'
-    if args.SCHEDULER:
-        names = {'PBS': '{PBS_JOBNAME}', 'SLURM': '{SLURM_JOB_NAME}', 'SBATCH': '{SLURM_JOB_NAME}'}
-        cluster_job_name = names.get(args.SCHEDULER.upper(), '')
-        if not cluster_job_name:
-            raise ValueError(f'Unsupported scheduler: {args.SCHEDULER}, accepts pbs, qsub, slurm, sbatch.')
-        ids = {'PBS': '{PBS_JOBID}', 'QSUB': '{PBS_JOBID}', 'SLURM': '{SLURM_JOB_ID}', 'SBATCH': '{SLURM_JOB_ID}'}
-        cluster_job_id = ids.get(args.SCHEDULER.upper(), '')
-        schedule(args.SCHEDULER, eclip_config, outdir, tmpdir, script_dir, log_dir, idr_outdir,
-                 eclip_script, idr_script, idr_config, debug, args.CORES, args.MEMORY, args.TIME,
-                 args.JOBNAME, args.EMAIL, cluster_job_name, cluster_job_id, stdout)
-    else:
-        clip(eclip_config, outdir, tmpdir, script_dir, log_dir, idr_outdir, eclip_script,
-             idr_script, idr_config, debug, 'LOCAL', 'USER', stdout)
+
+@ruffus.transform(pos_sort_bam, ruffus.suffix('.name.sorted.pos.sorted.bam'), '.name.sorted.pos.sorted.bam.bai')
+def index_bam(bam, bai):
+    cmd = ['samtools', 'index', bam, bai]
+    logger.debug(f'Indexing BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Indexing BAM {os.path.basename(bam)} completed.')
+
+
+@ruffus.follows(index_bam)
+@ruffus.transform(pos_sort_bam, ruffus.suffix('.name.sorted.pos.sorted.bam'), '.name.sorted.pos.sorted.deduped.bam')
+def dedup_bam(bam, deduped_bam):
+    cmd = ['umi_tools', 'dedup',
+           '--random-seed', 1,
+           '-I', bam,
+           '--method', 'unique',
+           '--output-stats', deduped_bam.replace('.deduped.bam', '.dedup'),
+           '--log', deduped_bam.replace('.deduped.bam', '.dedup.metrics'),
+           '-S', deduped_bam]
+    logger.debug(f'Deduplcating BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Deduplcating BAM {os.path.basename(bam)} completed.')
+
+
+@ruffus.transform(dedup_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.bam'),
+                  '.name.sorted.pos.sorted.deduped.sorted.bam')
+def sort_deduped_bam(bam, sorted_bam):
+    cmd = ['samtools', 'sort', '-o', sorted_bam, bam]
+    logger.debug(f'Sorting deduped BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Sorting deduped BAM {os.path.basename(bam)} completed.')
+
+
+@ruffus.transform(sort_deduped_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.sorted.bam'),
+                  '.name.sorted.pos.sorted.deduped.sorted.bam.bai')
+def index_dedup_sorted_bam(bam, bai):
+    cmd = ['samtools', 'index', bam, bai]
+    logger.debug(f'Indexing deduped sorted BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Indexing deduped sorted BAM {os.path.basename(bam)} completed.')
+
+
+@ruffus.follows(index_dedup_sorted_bam)
+@ruffus.transform(sort_deduped_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.sorted.bam'),
+                  ['.name.sorted.pos.sorted.deduped.sorted.positive.bw',
+                   '.name.sorted.pos.sorted.deduped.sorted.negative.bw'])
+def make_bigwig_files(bam, bigwig):
+    cmd = ['makebigwigfiles',
+           '--bw_pos', bam.replace('.sorted.bam', 'sorted.positive.bw'),
+           '--bw_neg', bam.replace('.sorted.bam', 'sorted.negative.bw'),
+           '--bam', bam,
+           '--genome', os.path.join(GENOME_INDEX, 'chrNameLength.txt'),
+           '--direction', 'f']
+    logger.debug(f'Making BigWig files using BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Making BigWig files using BAM {os.path.basename(bam)} completed.')
+
+
+@ruffus.follows(make_bigwig_files)
+@ruffus.transform(sort_deduped_bam, ruffus.suffix('.deduped.sorted.bam'), '.peak.clusters.bed')
+def clipper(bam, bed):
+    cmd = ['clipper',
+           '--species', SPECIES,
+           '--bam', bam,
+           '--outfile', bed]
+    logger.debug(f'Identifying peaks using BAM {os.path.basename(bam)} ...')
+    run_cmd(cmd)
+    logger.debug(f'Identifying peaks using BAM {os.path.basename(bam)} completed.')
 
 
 if __name__ == '__main__':
-    main()
+    pass
+    # ruffus.pipeline_run(multiprocess=1, verbose=1)
+    ruffus.pipeline_printout()
