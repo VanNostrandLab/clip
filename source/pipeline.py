@@ -43,7 +43,7 @@ def run_cmd(cmd, output_mode='wt', **kwargs):
     """
     
     def cmding(cmd):
-        cmd = [str(c) for c in cmd]
+        cmd = [str(c) for c in cmd if c]
         if '<' in cmd:
             raise ValueError('Invalid cmd, standard input via "<" not supported yet.')
         message = ' '.join(cmd).replace(' -', ' \\\n  -').replace(' >', ' \\\n  >')
@@ -389,44 +389,35 @@ def genomic_map(mate, bam):
     logger.debug(f'Mapping {message} to genome ...')
     run_cmd(cmd)
     logger.debug(f'Mapping {message} to genome completed.')
-
-
-@ruffus.jobs_limit(1)
-@ruffus.transform(genomic_map, ruffus.suffix('.genome.map.Aligned.out.bam'), '.genome.map.name.sorted.bam')
-def name_sort_bam(bam, sorted_bam):
-    cmd = ['samtools', 'sort', '-@', CORES, '-n', '-o', sorted_bam, bam]
+    
+    
+def sort_bam(bam, sorted_bam, name=False):
+    option = '-n' if name else ''
+    cmd = ['samtools', 'sort', '-@', CORES, option, '-m', '4G', '-o', sorted_bam, bam]
     logger.debug(f'Name sorting BAM {os.path.basename(bam)} ...')
     run_cmd(cmd)
     logger.debug(f'Name sorting BAM {os.path.basename(bam)} completed.')
+    return sorted_bam
 
-
-@ruffus.jobs_limit(1)
-@ruffus.transform(name_sort_bam, ruffus.suffix('.name.sorted.bam'), '.name.sorted.pos.sorted.bam')
-def pos_sort_bam(bam, sorted_bam):
-    cmd = ['samtools', 'sort', '-@', CORES, '-o', sorted_bam, bam]
-    logger.debug(f'Position sorting BAM {os.path.basename(bam)} ...')
-    run_cmd(cmd)
-    logger.debug(f'Position sorting BAM {os.path.basename(bam)} completed.')
 
 # SE: name sort -> pos sort -> umi_tools dedup -> pos sort -> index
 # PE: name sort -> barcode collapse -> pos sort r2_bam -> index
 
 
-@ruffus.active_if(len(PE_READS) != 0)
-@ruffus.transform(name_sort_bam, ruffus.suffix('.genome.map.name.sorted.bam'), '.genome.map.name.sorted.deduped.bam')
-def barcode_collapse(deduped_bam, collapsed_bam):
+def barcode_collapse(bam):
+    dedup_bam = bam.replace('.genome.map.name.sorted.bam', '.genome.map.name.sorted.deduped.bam')
     cmd = ['barcodecollapsepe.py',
-           '-b', deduped_bam,
-           '-o', collapsed_bam,
-           '-m', collapsed_bam.replace('.deduped.bam', '.deduped.metrics')]
-    logger.debug(f'Collapsing barcode for {deduped_bam} ...')
+           '-b', bam,
+           '-o', dedup_bam,
+           '-m', bam.replace('.genome.map.name.sorted.bam', '.genome.map.name.sorted.dedup.metrics')]
+    logger.debug(f'Collapsing barcode for {bam} ...')
     run_cmd(cmd)
-    logger.debug(f'Collapsing barcode for {deduped_bam} completed.')
+    logger.debug(f'Collapsing barcode for {bam} completed.')
+    return dedup_bam
 
 
-@ruffus.active_if(len(PE_READS) == 0)
-@ruffus.transform(name_sort_bam, ruffus.suffix('.genome.map.name.sorted.bam'), '.genome.map.name.sorted.deduped.bam')
-def dedup_bam(bam, deduped_bam):
+def umi_dedup(bam):
+    deduped_bam = bam.replace('.sorted.bam', '.sorted.deduped.bam')
     cmd = ['umi_tools', 'dedup',
            '--random-seed', 1,
            '-I', bam,
@@ -437,17 +428,18 @@ def dedup_bam(bam, deduped_bam):
     logger.debug(f'Deduplcating BAM {os.path.basename(bam)} ...')
     run_cmd(cmd)
     logger.debug(f'Deduplcating BAM {os.path.basename(bam)} completed.')
-    
-    
-def view_read2(bam, r2_bam):
+    return deduped_bam
+
+
+def view_read2(bam):
+    r2_bam = bam.replace('.deduped.bam', '.r2.deduped.bam')
     cmd = ['samtools', 'view', '-@', CORES, '-f', 128, '-b', '-o', r2_bam, bam]
     logger.debug(f'Extracting read 2 from {bam} ...')
     run_cmd(cmd)
     logger.debug(f'Extracting read 2 from {bam} completed.')
-    
-    
-@ruffus.jobs_limit(1)
-@ruffus.transform(pos_sort_bam, ruffus.suffix('.name.sorted.pos.sorted.bam'), '.name.sorted.pos.sorted.bam.bai')
+    return r2_bam
+
+
 def index_bam(bam, bai):
     cmd = ['samtools', 'index', '-@', CORES, bam, bai]
     logger.debug(f'Indexing BAM {os.path.basename(bam)} ...')
@@ -455,27 +447,22 @@ def index_bam(bam, bai):
     logger.debug(f'Indexing BAM {os.path.basename(bam)} completed.')
 
 
-@ruffus.jobs_limit(1)
-@ruffus.transform(dedup_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.bam'),
-                  '.name.sorted.pos.sorted.deduped.sorted.bam')
-def sort_deduped_bam(bam, sorted_bam):
-    cmd = ['samtools', 'sort', '-@', CORES, '-o', sorted_bam, bam]
-    logger.debug(f'Sorting deduped BAM {os.path.basename(bam)} ...')
-    run_cmd(cmd)
-    logger.debug(f'Sorting deduped BAM {os.path.basename(bam)} completed.')
+@ruffus.transform(genomic_map, ruffus.suffix('.genome.map.Aligned.out.bam'),
+                  ['*.deduped.bam', '*.deduped.pos.sorted.bam'])
+def dedup_bam(bam, deduped_bam):
+    sorted_bam = sort_bam(bam, bam.replace('.genome.map.Aligned.out.bam', '.genome.map.name.sorted.bam'))
+    if PE_READS:
+        deduped_bam = barcode_collapse(sorted_bam)
+        ds_bam = sort_bam(deduped_bam, deduped_bam.replace('.deduped.bam', '.pos.sorted.bam'), name=False)
+        r2_bam = view_read2(ds_bam)
+    else:
+        sorted_bam = sort_bam(sorted_bam, sorted_bam.replace('.sorted.bam', '.sorted.pos.sorted.bam'), name=False)
+        deduped_bam = umi_dedup(sorted_bam)
+        r2_bam = sort_bam(deduped_bam, deduped_bam.replace('.deduped.bam', '.deduped.pos.sorted.bam'), name=False)
+    index_bam(r2_bam, f'{r2_bam}.bai')
 
 
-@ruffus.transform(sort_deduped_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.sorted.bam'),
-                  '.name.sorted.pos.sorted.deduped.sorted.bam.bai')
-def index_dedup_sorted_bam(bam, bai):
-    cmd = ['samtools', 'index', '-@', CORES, bam, bai]
-    logger.debug(f'Indexing deduped sorted BAM {os.path.basename(bam)} ...')
-    run_cmd(cmd)
-    logger.debug(f'Indexing deduped sorted BAM {os.path.basename(bam)} completed.')
-
-
-@ruffus.follows(index_dedup_sorted_bam)
-@ruffus.transform(sort_deduped_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.sorted.bam'),
+@ruffus.transform(dedup_bam, ['*.deduped.bam', '*.deduped.pos.sorted.bam'],
                   ['.name.sorted.pos.sorted.deduped.sorted.positive.bw',
                    '.name.sorted.pos.sorted.deduped.sorted.negative.bw'])
 def make_bigwig_files(bam, bigwig):
@@ -491,7 +478,7 @@ def make_bigwig_files(bam, bigwig):
 
 
 @ruffus.follows(make_bigwig_files)
-@ruffus.transform(sort_deduped_bam, ruffus.suffix('.deduped.sorted.bam'), '.peak.clusters.bed')
+@ruffus.transform(dedup_bam, ruffus.suffix('.deduped.sorted.bam'), '.peak.clusters.bed')
 def clipper(bam, bed):
     cmd = ['clipper',
            '--species', SPECIES,
