@@ -14,6 +14,8 @@ import glob
 
 import ruffus
 
+
+READS_MODE = 'paired-end'
 CORES = 4
 GENOME_INDEX = '/storage/vannostrand/reference_data/hg19/genome_star_index'
 REPEAT_INDEX = '/storage/vannostrand/reference_data/hg19/repbase_v2_star_index'
@@ -31,8 +33,8 @@ note.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', d
 note.setLevel(logging.DEBUG)
 logger.addHandler(note)
 
-fastqs = ['/storage/vannostrand/benchmark_data/chimeCLIP_yeolabpipeline_2/Au4_S4_L001_R1_001.fastq.gz']
-MATURE_FASTA = '/storage/vannostrand/benchmark_data/chimeCLIP_yeolabpipeline_2/mature.hsa.T.fa'
+# fastqs = ['1_R1_001.fastq.gz', '1_R2_001.fastq.gz', '2_R1_001.fastq.gz', '2_R2_001.fastq.gz']
+fastqs = [('1_R1_001.fastq.gz', '1_R2_001.fastq.gz'), ('2_R1_001.fastq.gz', '2_R2_001.fastq.gz')]
 
 
 def run_cmd(cmd, output_mode='wt', **kwargs):
@@ -69,10 +71,27 @@ def run_cmd(cmd, output_mode='wt', **kwargs):
 
 
 @ruffus.jobs_limit(1)
-# @ruffus.follows(ruffus.mkdir('logs', 'data', 'results', 'scripts'))
-@ruffus.transform(fastqs, ruffus.formatter(r'.+/(?P<BASENAME>.*).f[ast]*q.gz$'),
+@ruffus.transform(fastqs,
+                  ruffus.formatter(r'.+/(?P<BASENAME>.*).f[ast]*q.gz$',
+                                   r'.+/(?P<BASENAME>.*).f[ast]*q.gz$'),
+                  [os.path.join(os.getcwd(), '{BASENAME[0]}.fastq.gz'),
+                   os.path.join(os.getcwd(), '{BASENAME[1]}.fastq.gz')])
+def pe_soft_link_rawdata_to_data_directory(fastqs, links):
+    for fastq, link in zip(fastqs, links):
+        fastq = os.path.abspath(fastq)
+        if fastq == link:
+            logger.warning("No symbolic link made. You are directly working on the original data files.")
+        else:
+            logger.debug(f'Soft link {os.path.basename(fastq)}:\n  ln -s {fastq} {link}')
+            os.symlink(fastq, link)
+
+
+@ruffus.jobs_limit(1)
+@ruffus.active_if(READS_MODE == 'single-end')
+@ruffus.transform(fastqs,
+                  ruffus.formatter(r'.+/(?P<BASENAME>.*).f[ast]*q.gz$'),
                   os.path.join(os.getcwd(), '{BASENAME[0]}.fastq.gz'))
-def soft_link_rawdata_to_data_directory(fastq, link):
+def se_soft_link_rawdata_to_data_directory(fastq, link):
     if fastq == link:
         logger.warning("No symbolic link made. You are directly working on the original data files.")
     else:
@@ -80,7 +99,7 @@ def soft_link_rawdata_to_data_directory(fastq, link):
         os.symlink(fastq, link)
 
 
-@ruffus.transform(soft_link_rawdata_to_data_directory,
+@ruffus.transform(se_soft_link_rawdata_to_data_directory,
                   ruffus.formatter(r'.+/(?P<BASENAME>.*).fastq.gz$'),
                   os.path.join(os.getcwd(), '{BASENAME[0]}.umi.fastq.gz'))
 def extract_umi(fastq, umi_extracted_fastq):
@@ -96,8 +115,39 @@ def extract_umi(fastq, umi_extracted_fastq):
     logger.debug(f'Extracting UMIs for {os.path.basename(fastq)} completed.')
 
 
+barcodes, barcodes_file, length = [('NIL', 'NIL'), ('0B1', 'D3f')], ['', ''], [5, 5]
+newname, dataset = [('clip1', 'clip2')], [('dataset1', 'dataset2')]
+
+
+def generate_demux_parameters():
+    pass
+
+
+@ruffus.transform(pe_soft_link_rawdata_to_data_directory,
+                  ruffus.formatter(r'.+/(?P<BASENAME>.*).fastq.gz$',
+                                   r'.+/(?P<BASENAME>.*).fastq.gz$'),
+                  [os.path.join(os.getcwd(), '{BASENAME[0]}.*.fastq.gz'),
+                   os.path.join(os.getcwd(), '{BASENAME[1]}.*.fastq.gz')],
+                   barcodes, barcodes_file, length, newname, dataset)
+def demux_reads(fastq, demuxed_fastq, barcodes, barcodes_file, length, newname, dataset):
+    fastq1, fastq2 = fastq
+    print(fastq, demuxed_fastq, barcodes, barcodes_file, length, newname, dataset)
+    cmd = ['eclipdemux',
+           '--metrics', '',
+           '--expectedbarcodeida', barcodes[0],
+           '--expectedbarcodeidb', barcodes[1],
+           '--fastq1', fastq1,
+           '--fastq2', fastq2,
+           '--newname', newname,
+           '--dataset', dataset,
+           '--barcodesfile', barcodes_file,
+           '--length', length]
+    print(cmd)
+
+
 @ruffus.jobs_limit(1)
-@ruffus.transform(extract_umi, ruffus.suffix('.fastq.gz'), '.trimmed.fastq.gz')
+@ruffus.transform(extract_umi if READS_MODE == 'single-end' else demux_reads,
+                  ruffus.suffix('.fastq.gz'), '.trimmed.fastq.gz')
 def cut_adapter(fastq, adapter_trimmed_fastq):
     cmd = ['cutadapt',
            '-j', CORES,
@@ -240,25 +290,28 @@ def genomic_map(mate, bam):
     logger.debug(f'Mapping reads to reference genome for {os.path.basename(mate)} completed.')
 
 
+@ruffus.jobs_limit(1)
 @ruffus.transform(genomic_map, ruffus.suffix('.Aligned.out.bam'), '.name.sorted.bam')
 def name_sort_bam(bam, sorted_bam):
-    cmd = ['samtools', 'sort', '-n', '-o', sorted_bam, bam]
+    cmd = ['samtools', 'sort', '-@', CORES, '-n', '-o', sorted_bam, bam]
     logger.debug(f'Name sorting BAM {os.path.basename(bam)} ...')
     run_cmd(cmd)
     logger.debug(f'Name sorting BAM {os.path.basename(bam)} completed.')
 
 
+@ruffus.jobs_limit(1)
 @ruffus.transform(name_sort_bam, ruffus.suffix('.name.sorted.bam'), '.name.sorted.pos.sorted.bam')
 def pos_sort_bam(bam, sorted_bam):
-    cmd = ['samtools', 'sort', '-o', sorted_bam, bam]
+    cmd = ['samtools', 'sort', '-@', CORES, '-o', sorted_bam, bam]
     logger.debug(f'Position sorting BAM {os.path.basename(bam)} ...')
     run_cmd(cmd)
     logger.debug(f'Position sorting BAM {os.path.basename(bam)} completed.')
-    
 
+
+@ruffus.jobs_limit(1)
 @ruffus.transform(pos_sort_bam, ruffus.suffix('.name.sorted.pos.sorted.bam'), '.name.sorted.pos.sorted.bam.bai')
 def index_bam(bam, bai):
-    cmd = ['samtools', 'index', bam, bai]
+    cmd = ['samtools', 'index', '-@', CORES, bam, bai]
     logger.debug(f'Indexing BAM {os.path.basename(bam)} ...')
     run_cmd(cmd)
     logger.debug(f'Indexing BAM {os.path.basename(bam)} completed.')
@@ -279,10 +332,11 @@ def dedup_bam(bam, deduped_bam):
     logger.debug(f'Deduplcating BAM {os.path.basename(bam)} completed.')
 
 
+@ruffus.jobs_limit(1)
 @ruffus.transform(dedup_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.bam'),
                   '.name.sorted.pos.sorted.deduped.sorted.bam')
 def sort_deduped_bam(bam, sorted_bam):
-    cmd = ['samtools', 'sort', '-o', sorted_bam, bam]
+    cmd = ['samtools', 'sort', '-@', CORES, '-o', sorted_bam, bam]
     logger.debug(f'Sorting deduped BAM {os.path.basename(bam)} ...')
     run_cmd(cmd)
     logger.debug(f'Sorting deduped BAM {os.path.basename(bam)} completed.')
@@ -291,7 +345,7 @@ def sort_deduped_bam(bam, sorted_bam):
 @ruffus.transform(sort_deduped_bam, ruffus.suffix('.name.sorted.pos.sorted.deduped.sorted.bam'),
                   '.name.sorted.pos.sorted.deduped.sorted.bam.bai')
 def index_dedup_sorted_bam(bam, bai):
-    cmd = ['samtools', 'index', bam, bai]
+    cmd = ['samtools', 'index', '-@', CORES, bam, bai]
     logger.debug(f'Indexing deduped sorted BAM {os.path.basename(bam)} ...')
     run_cmd(cmd)
     logger.debug(f'Indexing deduped sorted BAM {os.path.basename(bam)} completed.')
@@ -327,5 +381,5 @@ def clipper(bam, bed):
 
 if __name__ == '__main__':
     pass
-    # ruffus.pipeline_run(multiprocess=1, verbose=1)
-    ruffus.pipeline_printout()
+    ruffus.pipeline_run(multiprocess=1, verbose=1)
+    # ruffus.pipeline_printout()
