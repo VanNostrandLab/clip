@@ -25,8 +25,18 @@ merge_peak will be created. Also, an executable script `clip` will be created in
 current directory. 
 
 ## Usage:
-Once `clip` was successfully installed, it will tell you how to display its 
-usage at the very end. In case you did not noticed that, you can always check 
+
+### For Van Nonstrand Lab users
+The package has been installed in the following directory:
+`/storage/vannostrand/software/clip`
+
+Please `cd` into the directory and call `./clip -h`
+or call `/storage/vannostrand/software/clip/clip -h` 
+to see its usage.
+
+### For other users
+Once `clip` was successfully installed, it will tell you how to display its
+usage at the very end. In case you did not noticed that, you can always check
 its usage by yourself.
 
 ```shell script
